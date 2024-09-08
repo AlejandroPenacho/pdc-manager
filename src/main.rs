@@ -19,6 +19,13 @@ enum MainToListenerMessage {
     Shutdown,
 }
 
+enum MainToInterfaceMessage {
+    AllOk,
+}
+enum InterfaceToMainMessage {
+    Text(String),
+}
+
 #[tokio::main]
 async fn main() {
     println!("Hello, world!");
@@ -29,19 +36,54 @@ async fn main() {
     let (main_to_listener_sender, main_to_listener_receiver) =
         mpsc::channel::<MainToListenerMessage>(300);
 
-    let gate_handle = task::spawn(async move {
+    let (interface_to_main_sender, mut interface_to_main_receiver) =
+        mpsc::channel::<InterfaceToMainMessage>(300);
+
+    let listener_handle = task::spawn(async move {
         listen_port(main_to_listener_receiver, connection_to_main_sender).await
     });
 
+    let interface_handle = std::thread::spawn(move || interface_loop(interface_to_main_sender));
+
+    let mut all_senders = Vec::new();
+
     loop {
-        match connection_to_main_receiver.recv().await.unwrap() {
-            MainLoopMessage::Message(msg) => {
-                println!("{}", msg);
+        let mut break_loop = false;
+        tokio::select! {
+            message = connection_to_main_receiver.recv() => {
+                match message.unwrap() {
+                    MainLoopMessage::Message(msg) => {
+                        println!("From outside: {}", msg);
+                    },
+                    MainLoopMessage::NewConnection(sender) => {
+                        all_senders.push(sender)
+                    }
+                    _ => {}
+                }
+            },
+            message = interface_to_main_receiver.recv() => {
+                match message.unwrap() {
+                    InterfaceToMainMessage::Text(x) => {
+                        if &x.trim() == &"q" {
+                            break_loop = true;
+                        } else {
+                            println!("Received from you {}", x)
+                        }
+                    }
+                }
             }
-            _ => break,
+        }
+        if break_loop {
+            break;
         }
     }
-    gate_handle.await.unwrap();
+
+    main_to_listener_sender
+        .send(MainToListenerMessage::Shutdown)
+        .await
+        .unwrap();
+    listener_handle.await.unwrap();
+    // Do NOT join the interface!
 }
 
 async fn listen_port(
@@ -111,5 +153,15 @@ async fn handle_connection(
         if break_loop {
             break;
         }
+    }
+}
+
+fn interface_loop(interface_to_main_sender: mpsc::Sender<InterfaceToMainMessage>) {
+    loop {
+        let mut buffer = String::new();
+        std::io::stdin().read_line(&mut buffer).unwrap();
+        interface_to_main_sender
+            .blocking_send(InterfaceToMainMessage::Text(buffer))
+            .unwrap();
     }
 }
