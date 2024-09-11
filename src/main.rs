@@ -4,6 +4,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio::task;
 
+use crossterm::event;
+
 enum MainLoopMessage {
     AllOk,
     Message(String),
@@ -28,6 +30,59 @@ enum InterfaceToMainMessage {
 
 #[tokio::main]
 async fn main() {
+    let mut terminal = ratatui::init();
+
+    let mut current_message = String::new();
+    let mut all_messages = Vec::new();
+
+    loop {
+        terminal
+            .draw(|frame| {
+                let [main_area, bottom_area] = ratatui::layout::Layout::vertical([
+                    ratatui::layout::Constraint::Min(1),
+                    ratatui::layout::Constraint::Max(2),
+                ])
+                .areas(frame.area());
+
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(
+                        all_messages.iter().cloned().collect::<String>().as_str(),
+                    ),
+                    main_area,
+                );
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(format!("{}|", current_message).as_str()),
+                    bottom_area,
+                );
+            })
+            .unwrap();
+        if let event::Event::Key(key) = event::read().unwrap() {
+            if key.kind == event::KeyEventKind::Press {
+                match key.code {
+                    event::KeyCode::Backspace => {
+                        current_message.pop();
+                    }
+                    event::KeyCode::Enter => {
+                        current_message.push('\n');
+                        all_messages.push(current_message);
+                        current_message = String::new();
+                    }
+                    event::KeyCode::Char(x) => {
+                        current_message.push(x);
+                    }
+                    _ => {}
+                };
+                if &all_messages.last().map_or("", |x| x.as_str().trim()) == &"exit" {
+                    break;
+                }
+            }
+        }
+    }
+
+    ratatui::restore();
+}
+
+async fn main_alt() {
     println!("Hello, world!");
 
     let (connection_to_main_sender, mut connection_to_main_receiver) =
@@ -90,6 +145,7 @@ async fn listen_port(
     mut main_to_listener_receiver: mpsc::Receiver<MainToListenerMessage>,
     connection_to_main_sender: mpsc::Sender<MainLoopMessage>,
 ) {
+    if let Err(_) = tokio::fs::remove_file("the_socket").await {};
     let listener = UnixListener::bind("the_socket").unwrap();
     loop {
         let break_loop: bool = tokio::select! {
