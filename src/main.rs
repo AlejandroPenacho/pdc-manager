@@ -10,6 +10,7 @@ enum MainLoopMessage {
     AllOk,
     Message(String),
     NewConnection(mpsc::Sender<MainToConnectionMessage>),
+    KeyPressed(event::KeyCode),
 }
 
 enum MainToConnectionMessage {
@@ -30,11 +31,17 @@ enum InterfaceToMainMessage {
 
 #[tokio::main]
 async fn main() {
+    let (
+        interface_handle,
+        listener_handle,
+        mut connection_to_main_receiver,
+        main_to_listener_sender,
+    ) = initialize_process();
+
+    let mut all_senders = Vec::new();
+    let mut current_input = String::new();
+
     let mut terminal = ratatui::init();
-
-    let mut current_message = String::new();
-    let mut all_messages = Vec::new();
-
     loop {
         terminal
             .draw(|frame| {
@@ -45,54 +52,75 @@ async fn main() {
                 .areas(frame.area());
 
                 frame.render_widget(
-                    ratatui::widgets::Paragraph::new(
-                        all_messages.iter().cloned().collect::<String>().as_str(),
-                    ),
+                    ratatui::widgets::Paragraph::new("Everything as expected :)"),
                     main_area,
                 );
                 frame.render_widget(
-                    ratatui::widgets::Paragraph::new(format!("{}|", current_message).as_str()),
+                    ratatui::widgets::Paragraph::new(format!("{}|", current_input).as_str()),
                     bottom_area,
                 );
             })
             .unwrap();
-        if let event::Event::Key(key) = event::read().unwrap() {
-            if key.kind == event::KeyEventKind::Press {
-                match key.code {
-                    event::KeyCode::Backspace => {
-                        current_message.pop();
-                    }
-                    event::KeyCode::Enter => {
-                        current_message.push('\n');
-                        all_messages.push(current_message);
-                        current_message = String::new();
-                    }
-                    event::KeyCode::Char(x) => {
-                        current_message.push(x);
-                    }
-                    _ => {}
-                };
-                if &all_messages.last().map_or("", |x| x.as_str().trim()) == &"exit" {
-                    break;
-                }
+
+        let mut break_loop = false;
+        let message = connection_to_main_receiver.recv().await;
+
+        match message.unwrap() {
+            MainLoopMessage::Message(msg) => {
+                println!("From outside: {}", msg);
             }
+            MainLoopMessage::NewConnection(sender) => all_senders.push(sender),
+            MainLoopMessage::KeyPressed(key_code) => match key_code {
+                event::KeyCode::Backspace => {
+                    current_input.pop();
+                }
+                event::KeyCode::Enter => break_loop = true,
+                event::KeyCode::Char(x) => {
+                    current_input.push(x);
+                }
+                _ => {}
+            },
+            _ => {}
+        };
+
+        if break_loop {
+            break;
         }
     }
 
+    terminal
+        .draw(|frame| {
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new("Press any key to exit"),
+                frame.area(),
+            )
+        })
+        .unwrap();
+
+    drop(connection_to_main_receiver);
+
+    main_to_listener_sender
+        .send(MainToListenerMessage::Shutdown)
+        .await
+        .unwrap();
+    listener_handle.await.unwrap();
+    interface_handle.join().unwrap();
     ratatui::restore();
 }
 
-async fn main_alt() {
-    println!("Hello, world!");
-
-    let (connection_to_main_sender, mut connection_to_main_receiver) =
+fn initialize_process() -> (
+    std::thread::JoinHandle<()>,
+    task::JoinHandle<()>,
+    mpsc::Receiver<MainLoopMessage>,
+    mpsc::Sender<MainToListenerMessage>,
+) {
+    let (connection_to_main_sender, connection_to_main_receiver) =
         mpsc::channel::<MainLoopMessage>(300);
 
     let (main_to_listener_sender, main_to_listener_receiver) =
         mpsc::channel::<MainToListenerMessage>(300);
 
-    let (interface_to_main_sender, mut interface_to_main_receiver) =
-        mpsc::channel::<InterfaceToMainMessage>(300);
+    let interface_to_main_sender = connection_to_main_sender.clone();
 
     let listener_handle = task::spawn(async move {
         listen_port(main_to_listener_receiver, connection_to_main_sender).await
@@ -100,45 +128,12 @@ async fn main_alt() {
 
     let interface_handle = std::thread::spawn(move || interface_loop(interface_to_main_sender));
 
-    let mut all_senders = Vec::new();
-
-    loop {
-        let mut break_loop = false;
-        tokio::select! {
-            message = connection_to_main_receiver.recv() => {
-                match message.unwrap() {
-                    MainLoopMessage::Message(msg) => {
-                        println!("From outside: {}", msg);
-                    },
-                    MainLoopMessage::NewConnection(sender) => {
-                        all_senders.push(sender)
-                    }
-                    _ => {}
-                }
-            },
-            message = interface_to_main_receiver.recv() => {
-                match message.unwrap() {
-                    InterfaceToMainMessage::Text(x) => {
-                        if &x.trim() == &"q" {
-                            break_loop = true;
-                        } else {
-                            println!("Received from you {}", x)
-                        }
-                    }
-                }
-            }
-        }
-        if break_loop {
-            break;
-        }
-    }
-
-    main_to_listener_sender
-        .send(MainToListenerMessage::Shutdown)
-        .await
-        .unwrap();
-    listener_handle.await.unwrap();
-    // Do NOT join the interface!
+    return (
+        interface_handle,
+        listener_handle,
+        connection_to_main_receiver,
+        main_to_listener_sender,
+    );
 }
 
 async fn listen_port(
@@ -165,7 +160,6 @@ async fn listen_port(
         }
     }
     remove_file("the_socket").await.ok();
-    println!("Exiting listener");
 }
 
 async fn handle_connection(
@@ -212,12 +206,17 @@ async fn handle_connection(
     }
 }
 
-fn interface_loop(interface_to_main_sender: mpsc::Sender<InterfaceToMainMessage>) {
+fn interface_loop(interface_to_main_sender: mpsc::Sender<MainLoopMessage>) {
     loop {
-        let mut buffer = String::new();
-        std::io::stdin().read_line(&mut buffer).unwrap();
-        interface_to_main_sender
-            .blocking_send(InterfaceToMainMessage::Text(buffer))
-            .unwrap();
+        if let event::Event::Key(key) = event::read().unwrap() {
+            if key.kind != event::KeyEventKind::Press {
+                continue;
+            }
+            if let Err(_) =
+                interface_to_main_sender.blocking_send(MainLoopMessage::KeyPressed(key.code))
+            {
+                break;
+            }
+        }
     }
 }
