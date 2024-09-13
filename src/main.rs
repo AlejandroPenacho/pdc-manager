@@ -4,12 +4,15 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio::task;
 
+use time;
+
 use crossterm::event;
 
 enum MainLoopMessage {
     AllOk,
-    Message(String),
-    NewConnection(mpsc::Sender<MainToConnectionMessage>),
+    SocketMessage(String, String),
+    NewConnection(String, mpsc::Sender<MainToConnectionMessage>),
+    ConnectionDropped(String),
     KeyPressed(event::KeyCode),
 }
 
@@ -38,7 +41,7 @@ async fn main() {
         main_to_listener_sender,
     ) = initialize_process();
 
-    let mut all_senders = Vec::new();
+    let mut all_senders = std::collections::HashMap::new();
 
     let mut app = App::new();
 
@@ -54,10 +57,19 @@ async fn main() {
         let message = connection_to_main_receiver.recv().await;
 
         match message.unwrap() {
-            MainLoopMessage::Message(msg) => {
-                println!("From outside: {}", msg);
+            MainLoopMessage::SocketMessage(sender, msg) => {
+                app.add_connection_message(sender, msg);
             }
-            MainLoopMessage::NewConnection(sender) => all_senders.push(sender),
+            MainLoopMessage::NewConnection(socket_name, sender) => {
+                all_senders.insert(socket_name.clone(), sender);
+                app.current_jobs.push(CurrentJob {
+                    job_name: socket_name,
+                    messages: Vec::new(),
+                })
+            }
+            MainLoopMessage::ConnectionDropped(sender) => {
+                app.finish_connection(sender);
+            }
             MainLoopMessage::KeyPressed(key_code) => match key_code {
                 event::KeyCode::Backspace => {
                     app.current_input.pop();
@@ -156,13 +168,15 @@ async fn handle_connection(
 ) {
     let (main_to_connection_sender, mut main_to_connection_receiver) = mpsc::channel(200);
 
-    connection_to_main_sender
-        .send(MainLoopMessage::NewConnection(main_to_connection_sender))
-        .await
-        .unwrap();
+    let mut buffer: [u8; 500] = [0; 500];
+    let n_bytes = stream.read(&mut buffer).await.unwrap();
+    let socket_name = std::str::from_utf8(&buffer[..n_bytes]).unwrap().to_owned();
 
-    stream
-        .write(&"Hello, place your orders\n".as_bytes())
+    connection_to_main_sender
+        .send(MainLoopMessage::NewConnection(
+            socket_name.clone(),
+            main_to_connection_sender,
+        ))
         .await
         .unwrap();
 
@@ -172,17 +186,24 @@ async fn handle_connection(
             n_bytes = stream.read(&mut buffer) => {
                 let n_bytes = n_bytes.unwrap();
                 let message = std::str::from_utf8(&buffer[..n_bytes]).unwrap().to_owned();
-                connection_to_main_sender
-                    .send(MainLoopMessage::Message(message))
-                    .await
-                    .unwrap();
-                false
+                if message == "FINISH" {
+                    connection_to_main_sender
+                        .send(MainLoopMessage::ConnectionDropped(socket_name.clone()))
+                        .await
+                        .unwrap();
+                    true
+                } else {
+                    connection_to_main_sender
+                        .send(MainLoopMessage::SocketMessage(socket_name.clone(), message))
+                        .await
+                        .unwrap();
+                    false
+                }
             },
             message = main_to_connection_receiver.recv() => {
                 match message.unwrap() {
                     MainToConnectionMessage::AllOk => false,
                     MainToConnectionMessage::CancelJob => {
-                        println!("Cancelling");
                         true
                     }
                 }
@@ -211,10 +232,12 @@ fn interface_loop(interface_to_main_sender: mpsc::Sender<MainLoopMessage>) {
 
 struct FinishedJob {
     job_name: String,
+    end_time: String,
 }
 
 struct CurrentJob {
     job_name: String,
+    messages: Vec<String>,
 }
 
 struct App {
@@ -225,34 +248,45 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let finished_jobs = vec![
-            FinishedJob {
-                job_name: "Do the thing".to_owned(),
-            },
-            FinishedJob {
-                job_name: "Reset".to_owned(),
-            },
-            FinishedJob {
-                job_name: "Try again".to_owned(),
-            },
-        ];
-
-        let current_jobs = vec![
-            CurrentJob {
-                job_name: "Do the thing".to_owned(),
-            },
-            CurrentJob {
-                job_name: "Reset".to_owned(),
-            },
-            CurrentJob {
-                job_name: "Try again".to_owned(),
-            },
-        ];
         App {
             current_input: String::new(),
-            finished_jobs,
-            current_jobs,
+            finished_jobs: Vec::new(),
+            current_jobs: Vec::new(),
         }
+    }
+
+    fn add_new_connection(&mut self, connection_name: String) {
+        self.current_jobs.push(CurrentJob {
+            job_name: connection_name,
+            messages: Vec::new(),
+        })
+    }
+
+    fn add_connection_message(&mut self, connection_name: String, message: String) {
+        for job in self.current_jobs.iter_mut() {
+            if job.job_name == connection_name {
+                job.messages.push(message);
+                break;
+            }
+        }
+    }
+
+    fn finish_connection(&mut self, connection_name: String) {
+        let mut index_to_remove = None;
+        for (i, job_name) in self.current_jobs.iter().map(|x| &x.job_name).enumerate() {
+            if job_name == &connection_name {
+                index_to_remove = Some(i);
+                break;
+            }
+        }
+        self.current_jobs.remove(index_to_remove.unwrap());
+
+        let end_time = time::OffsetDateTime::now_utc();
+
+        self.finished_jobs.push(FinishedJob {
+            job_name: connection_name.clone(),
+            end_time: format!("{:0>2}:{:0>2}", end_time.hour(), end_time.minute()),
+        });
     }
 
     fn draw(&self, frame: &mut ratatui::Frame) {
@@ -277,14 +311,21 @@ impl App {
             .padding(finished_padding)
             .title("Finished Jobs");
 
-        let finished_job_names: Vec<String> = self
+        let rows: Vec<ratatui::widgets::Row> = self
             .finished_jobs
             .iter()
-            .map(|x| x.job_name.to_owned())
+            .enumerate()
+            .map(|(i, x)| {
+                ratatui::widgets::Row::new(vec![
+                    format!("{}", i + 1),
+                    x.job_name.clone(),
+                    x.end_time.clone(),
+                ])
+            })
             .collect();
 
         let finished_jobs_widget =
-            ratatui::widgets::List::new(finished_job_names).block(finished_block);
+            ratatui::widgets::Table::new(rows, [3, 15, 15]).block(finished_block);
 
         frame.render_widget(finished_jobs_widget, finished_jobs_area);
 
@@ -293,14 +334,17 @@ impl App {
         )
         .split(current_jobs_area);
 
-        for i in 0..self.current_jobs.len() {
+        for (i, job) in self.current_jobs.iter().enumerate() {
             let finished_padding = ratatui::widgets::block::Padding::new(3, 0, 1, 1);
 
             let finished_block = ratatui::widgets::Block::bordered()
                 .padding(finished_padding)
                 .title(self.current_jobs[i].job_name.to_owned());
 
-            frame.render_widget(finished_block, current_jobs_split_areas[i])
+            let job_messages =
+                ratatui::widgets::List::new(job.messages.clone()).block(finished_block);
+
+            frame.render_widget(job_messages, current_jobs_split_areas[i])
         }
 
         frame.render_widget(
