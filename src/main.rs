@@ -65,6 +65,8 @@ async fn main() {
                 app.current_jobs.push(CurrentJob {
                     job_name: socket_name,
                     messages: Vec::new(),
+                    current_epoch: 0,
+                    total_epochs: 1,
                 })
             }
             MainLoopMessage::ConnectionDropped(sender) => {
@@ -238,6 +240,8 @@ struct FinishedJob {
 struct CurrentJob {
     job_name: String,
     messages: Vec<String>,
+    current_epoch: usize,
+    total_epochs: usize,
 }
 
 struct App {
@@ -259,13 +263,23 @@ impl App {
         self.current_jobs.push(CurrentJob {
             job_name: connection_name,
             messages: Vec::new(),
+            current_epoch: 0,
+            total_epochs: 1,
         })
     }
 
     fn add_connection_message(&mut self, connection_name: String, message: String) {
+        let mut split_input = message.split("|");
+
+        let current_epoch: usize = split_input.next().unwrap().parse().unwrap();
+        let total_epochs: usize = split_input.next().unwrap().parse().unwrap();
+        let actual_message = split_input.next().unwrap().to_owned();
+
         for job in self.current_jobs.iter_mut() {
             if job.job_name == connection_name {
-                job.messages.push(message);
+                job.messages.push(actual_message);
+                job.current_epoch = current_epoch;
+                job.total_epochs = total_epochs;
                 break;
             }
         }
@@ -335,16 +349,41 @@ impl App {
         .split(current_jobs_area);
 
         for (i, job) in self.current_jobs.iter().enumerate() {
-            let finished_padding = ratatui::widgets::block::Padding::new(3, 0, 1, 1);
+            // let finished_padding = ratatui::widgets::block::Padding::new(3, 0, 1, 1);
 
-            let finished_block = ratatui::widgets::Block::bordered()
-                .padding(finished_padding)
-                .title(self.current_jobs[i].job_name.to_owned());
+            let finished_block =
+                ratatui::widgets::Block::bordered().title(self.current_jobs[i].job_name.to_owned());
 
-            let job_messages =
-                ratatui::widgets::List::new(job.messages.clone()).block(finished_block);
+            let block_inner = finished_block.inner(current_jobs_split_areas[i]);
 
-            frame.render_widget(job_messages, current_jobs_split_areas[i])
+            let [progress_area, second_area] = ratatui::layout::Layout::vertical([
+                ratatui::layout::Constraint::Max(1),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .areas(block_inner);
+
+            frame.render_widget(finished_block, current_jobs_split_areas[i]);
+
+            frame.render_widget(
+                ratatui::widgets::Gauge::default()
+                    .ratio(job.current_epoch as f64 / job.total_epochs as f64)
+                    .label(format!("{}/{}", job.current_epoch, job.total_epochs))
+                    .style(ratatui::style::Color::LightBlue)
+                    .gauge_style(ratatui::style::Color::Blue),
+                progress_area,
+            );
+
+            frame.render_widget(
+                ratatui::widgets::List::new(
+                    job.messages
+                        .iter()
+                        .cloned()
+                        .rev()
+                        .take(5)
+                        .collect::<Vec<String>>(),
+                ),
+                second_area,
+            );
         }
 
         frame.render_widget(
