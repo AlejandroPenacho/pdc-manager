@@ -39,26 +39,14 @@ async fn main() {
     ) = initialize_process();
 
     let mut all_senders = Vec::new();
-    let mut current_input = String::new();
+
+    let mut app = App::new();
 
     let mut terminal = ratatui::init();
     loop {
         terminal
             .draw(|frame| {
-                let [main_area, bottom_area] = ratatui::layout::Layout::vertical([
-                    ratatui::layout::Constraint::Min(1),
-                    ratatui::layout::Constraint::Max(2),
-                ])
-                .areas(frame.area());
-
-                frame.render_widget(
-                    ratatui::widgets::Paragraph::new("Everything as expected :)"),
-                    main_area,
-                );
-                frame.render_widget(
-                    ratatui::widgets::Paragraph::new(format!("{}|", current_input).as_str()),
-                    bottom_area,
-                );
+                app.draw(frame);
             })
             .unwrap();
 
@@ -72,11 +60,11 @@ async fn main() {
             MainLoopMessage::NewConnection(sender) => all_senders.push(sender),
             MainLoopMessage::KeyPressed(key_code) => match key_code {
                 event::KeyCode::Backspace => {
-                    current_input.pop();
+                    app.current_input.pop();
                 }
                 event::KeyCode::Enter => break_loop = true,
                 event::KeyCode::Char(x) => {
-                    current_input.push(x);
+                    app.current_input.push(x);
                 }
                 _ => {}
             },
@@ -218,5 +206,106 @@ fn interface_loop(interface_to_main_sender: mpsc::Sender<MainLoopMessage>) {
                 break;
             }
         }
+    }
+}
+
+struct FinishedJob {
+    job_name: String,
+}
+
+struct CurrentJob {
+    job_name: String,
+}
+
+struct App {
+    current_input: String,
+    finished_jobs: Vec<FinishedJob>,
+    current_jobs: Vec<CurrentJob>,
+}
+
+impl App {
+    fn new() -> Self {
+        let finished_jobs = vec![
+            FinishedJob {
+                job_name: "Do the thing".to_owned(),
+            },
+            FinishedJob {
+                job_name: "Reset".to_owned(),
+            },
+            FinishedJob {
+                job_name: "Try again".to_owned(),
+            },
+        ];
+
+        let current_jobs = vec![
+            CurrentJob {
+                job_name: "Do the thing".to_owned(),
+            },
+            CurrentJob {
+                job_name: "Reset".to_owned(),
+            },
+            CurrentJob {
+                job_name: "Try again".to_owned(),
+            },
+        ];
+        App {
+            current_input: String::new(),
+            finished_jobs,
+            current_jobs,
+        }
+    }
+
+    fn draw(&self, frame: &mut ratatui::Frame) {
+        let [main_area, bottom_area] = ratatui::layout::Layout::vertical([
+            ratatui::layout::Constraint::Min(1),
+            ratatui::layout::Constraint::Max(2),
+        ])
+        .areas(frame.area());
+
+        let finished_jobs_height = 7 + self.finished_jobs.len().min(5) as u16;
+
+        let [finished_jobs_area, _, current_jobs_area] = ratatui::layout::Layout::vertical([
+            ratatui::layout::Constraint::Max(finished_jobs_height),
+            ratatui::layout::Constraint::Max(3),
+            ratatui::layout::Constraint::Min(3),
+        ])
+        .areas(main_area);
+
+        let finished_padding = ratatui::widgets::block::Padding::new(3, 0, 1, 1);
+
+        let finished_block = ratatui::widgets::Block::bordered()
+            .padding(finished_padding)
+            .title("Finished Jobs");
+
+        let finished_job_names: Vec<String> = self
+            .finished_jobs
+            .iter()
+            .map(|x| x.job_name.to_owned())
+            .collect();
+
+        let finished_jobs_widget =
+            ratatui::widgets::List::new(finished_job_names).block(finished_block);
+
+        frame.render_widget(finished_jobs_widget, finished_jobs_area);
+
+        let current_jobs_split_areas = ratatui::layout::Layout::vertical(
+            std::iter::repeat(ratatui::layout::Constraint::Max(15)).take(self.current_jobs.len()),
+        )
+        .split(current_jobs_area);
+
+        for i in 0..self.current_jobs.len() {
+            let finished_padding = ratatui::widgets::block::Padding::new(3, 0, 1, 1);
+
+            let finished_block = ratatui::widgets::Block::bordered()
+                .padding(finished_padding)
+                .title(self.current_jobs[i].job_name.to_owned());
+
+            frame.render_widget(finished_block, current_jobs_split_areas[i])
+        }
+
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(format!("{}|", self.current_input).as_str()),
+            bottom_area,
+        );
     }
 }
