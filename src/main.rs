@@ -312,14 +312,16 @@ impl App {
 
         let finished_jobs_height = 7 + self.finished_jobs.len().min(5) as u16;
 
-        let [finished_jobs_area, _, current_jobs_area] = ratatui::layout::Layout::vertical([
-            ratatui::layout::Constraint::Max(finished_jobs_height),
-            ratatui::layout::Constraint::Max(3),
-            ratatui::layout::Constraint::Min(3),
-        ])
-        .areas(main_area);
+        let [finished_jobs_area, _, current_jobs_title, current_jobs_area] =
+            ratatui::layout::Layout::vertical([
+                ratatui::layout::Constraint::Max(finished_jobs_height),
+                ratatui::layout::Constraint::Max(1),
+                ratatui::layout::Constraint::Max(1),
+                ratatui::layout::Constraint::Min(3),
+            ])
+            .areas(main_area);
 
-        let finished_padding = ratatui::widgets::block::Padding::new(3, 0, 1, 1);
+        let finished_padding = ratatui::widgets::block::Padding::new(1, 0, 1, 1);
 
         let finished_block = ratatui::widgets::Block::bordered()
             .padding(finished_padding)
@@ -339,12 +341,18 @@ impl App {
             .collect();
 
         let finished_jobs_widget =
-            ratatui::widgets::Table::new(rows, [3, 15, 15]).block(finished_block);
+            ratatui::widgets::Table::new(rows, [2, 15, 15]).block(finished_block);
 
         frame.render_widget(finished_jobs_widget, finished_jobs_area);
 
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new("RUNNING JOBS")
+                .alignment(ratatui::layout::Alignment::Center),
+            current_jobs_title,
+        );
+
         let current_jobs_split_areas = ratatui::layout::Layout::vertical(
-            std::iter::repeat(ratatui::layout::Constraint::Max(15)).take(self.current_jobs.len()),
+            std::iter::repeat(ratatui::layout::Constraint::Max(10)).take(self.current_jobs.len()),
         )
         .split(current_jobs_area);
 

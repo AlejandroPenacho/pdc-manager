@@ -23,7 +23,7 @@ class FakeTraining:
 
         self.current_epoch += random.randint(50, 150)
         self.current_epoch = min(self.current_epoch, self.total_epochs)
-        message = "Hello with {self.current_epoch}"
+        message = f"Hello with {self.current_epoch}"
         self.socket.send(f"{self.current_epoch}|{self.total_epochs}|{message}".encode())
         return False
 
