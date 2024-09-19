@@ -1,3 +1,5 @@
+use serde::Deserialize;
+use serde_json;
 use tokio::fs::remove_file;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -8,11 +10,14 @@ use time;
 
 use crossterm::event;
 
+#[derive(Deserialize, PartialEq, Eq, Hash, Clone)]
+struct JobId(String);
+
 enum MainLoopMessage {
     AllOk,
-    SocketMessage(String, String),
-    NewConnection(String, mpsc::Sender<MainToConnectionMessage>),
-    ConnectionDropped(String),
+    SocketMessage(JobId, JobMessage),
+    NewConnection(FirstJobMessage, mpsc::Sender<MainToConnectionMessage>),
+    ConnectionDropped(JobId),
     KeyPressed(event::KeyCode),
 }
 
@@ -32,6 +37,22 @@ enum InterfaceToMainMessage {
     Text(String),
 }
 
+#[derive(Deserialize)]
+struct FirstJobMessage {
+    total_epochs: usize,
+    id: JobId,
+}
+
+#[derive(Deserialize)]
+struct JobMessage {
+    #[serde(default)]
+    current_epoch: Option<usize>,
+    #[serde(default)]
+    total_epochs: Option<usize>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
 #[tokio::main]
 async fn main() {
     let (
@@ -41,7 +62,8 @@ async fn main() {
         main_to_listener_sender,
     ) = initialize_process();
 
-    let mut all_senders = std::collections::HashMap::new();
+    let mut all_senders: std::collections::HashMap<JobId, mpsc::Sender<MainToConnectionMessage>> =
+        std::collections::HashMap::new();
 
     let mut app = App::new();
 
@@ -60,13 +82,13 @@ async fn main() {
             MainLoopMessage::SocketMessage(sender, msg) => {
                 app.add_connection_message(sender, msg);
             }
-            MainLoopMessage::NewConnection(socket_name, sender) => {
-                all_senders.insert(socket_name.clone(), sender);
+            MainLoopMessage::NewConnection(first_message, sender) => {
+                all_senders.insert(first_message.id.clone(), sender);
                 app.current_jobs.push(CurrentJob {
-                    job_name: socket_name,
+                    id: first_message.id,
                     messages: Vec::new(),
                     current_epoch: 0,
-                    total_epochs: 1,
+                    total_epochs: first_message.total_epochs,
                 })
             }
             MainLoopMessage::ConnectionDropped(sender) => {
@@ -168,15 +190,18 @@ async fn handle_connection(
     mut stream: UnixStream,
     connection_to_main_sender: mpsc::Sender<MainLoopMessage>,
 ) {
-    let (main_to_connection_sender, mut main_to_connection_receiver) = mpsc::channel(200);
+    let (main_to_connection_sender, mut main_to_connection_receiver) = mpsc::channel(500);
 
     let mut buffer: [u8; 500] = [0; 500];
     let n_bytes = stream.read(&mut buffer).await.unwrap();
-    let socket_name = std::str::from_utf8(&buffer[..n_bytes]).unwrap().to_owned();
+    let first_message: FirstJobMessage =
+        serde_json::from_str(std::str::from_utf8(&buffer[..n_bytes]).unwrap()).unwrap();
+
+    let socket_name = first_message.id.clone();
 
     connection_to_main_sender
         .send(MainLoopMessage::NewConnection(
-            socket_name.clone(),
+            first_message,
             main_to_connection_sender,
         ))
         .await
@@ -196,7 +221,7 @@ async fn handle_connection(
                     true
                 } else {
                     connection_to_main_sender
-                        .send(MainLoopMessage::SocketMessage(socket_name.clone(), message))
+                        .send(MainLoopMessage::SocketMessage(socket_name.clone(), serde_json::from_str(&message).unwrap()))
                         .await
                         .unwrap();
                     false
@@ -233,12 +258,12 @@ fn interface_loop(interface_to_main_sender: mpsc::Sender<MainLoopMessage>) {
 }
 
 struct FinishedJob {
-    job_name: String,
+    id: JobId,
     end_time: String,
 }
 
 struct CurrentJob {
-    job_name: String,
+    id: JobId,
     messages: Vec<String>,
     current_epoch: usize,
     total_epochs: usize,
@@ -261,33 +286,33 @@ impl App {
 
     fn add_new_connection(&mut self, connection_name: String) {
         self.current_jobs.push(CurrentJob {
-            job_name: connection_name,
+            id: JobId(connection_name),
             messages: Vec::new(),
             current_epoch: 0,
             total_epochs: 1,
         })
     }
 
-    fn add_connection_message(&mut self, connection_name: String, message: String) {
-        let mut split_input = message.split("|");
-
-        let current_epoch: usize = split_input.next().unwrap().parse().unwrap();
-        let total_epochs: usize = split_input.next().unwrap().parse().unwrap();
-        let actual_message = split_input.next().unwrap().to_owned();
-
+    fn add_connection_message(&mut self, connection_name: JobId, message: JobMessage) {
         for job in self.current_jobs.iter_mut() {
-            if job.job_name == connection_name {
-                job.messages.push(actual_message);
-                job.current_epoch = current_epoch;
-                job.total_epochs = total_epochs;
+            if job.id.0 == connection_name.0 {
+                if let Some(x) = message.message {
+                    job.messages.push(x);
+                }
+                if let Some(x) = message.current_epoch {
+                    job.current_epoch = x;
+                }
+                if let Some(x) = message.total_epochs {
+                    job.total_epochs = x;
+                }
                 break;
             }
         }
     }
 
-    fn finish_connection(&mut self, connection_name: String) {
+    fn finish_connection(&mut self, connection_name: JobId) {
         let mut index_to_remove = None;
-        for (i, job_name) in self.current_jobs.iter().map(|x| &x.job_name).enumerate() {
+        for (i, job_name) in self.current_jobs.iter().map(|x| &x.id).enumerate() {
             if job_name == &connection_name {
                 index_to_remove = Some(i);
                 break;
@@ -298,7 +323,7 @@ impl App {
         let end_time = time::OffsetDateTime::now_utc();
 
         self.finished_jobs.push(FinishedJob {
-            job_name: connection_name.clone(),
+            id: connection_name.clone(),
             end_time: format!("{:0>2}:{:0>2}", end_time.hour(), end_time.minute()),
         });
     }
@@ -312,8 +337,9 @@ impl App {
 
         let finished_jobs_height = 7 + self.finished_jobs.len().min(5) as u16;
 
-        let [finished_jobs_area, _, current_jobs_title, current_jobs_area] =
+        let [finished_jobs_title, finished_jobs_area, _, current_jobs_title, current_jobs_area] =
             ratatui::layout::Layout::vertical([
+                ratatui::layout::Constraint::Max(1),
                 ratatui::layout::Constraint::Max(finished_jobs_height),
                 ratatui::layout::Constraint::Max(1),
                 ratatui::layout::Constraint::Max(1),
@@ -321,11 +347,11 @@ impl App {
             ])
             .areas(main_area);
 
-        let finished_padding = ratatui::widgets::block::Padding::new(1, 0, 1, 1);
-
-        let finished_block = ratatui::widgets::Block::bordered()
-            .padding(finished_padding)
-            .title("Finished Jobs");
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new("FINISHED JOBS")
+                .alignment(ratatui::layout::Alignment::Center),
+            finished_jobs_title,
+        );
 
         let rows: Vec<ratatui::widgets::Row> = self
             .finished_jobs
@@ -334,14 +360,15 @@ impl App {
             .map(|(i, x)| {
                 ratatui::widgets::Row::new(vec![
                     format!("{}", i + 1),
-                    x.job_name.clone(),
+                    x.id.0.clone(),
                     x.end_time.clone(),
                 ])
             })
             .collect();
 
-        let finished_jobs_widget =
-            ratatui::widgets::Table::new(rows, [2, 15, 15]).block(finished_block);
+        let finished_padding = ratatui::widgets::block::Padding::new(1, 0, 1, 1);
+        let finished_jobs_widget = ratatui::widgets::Table::new(rows, [2, 15, 15])
+            .block(ratatui::widgets::Block::new().padding(finished_padding));
 
         frame.render_widget(finished_jobs_widget, finished_jobs_area);
 
@@ -360,7 +387,7 @@ impl App {
             // let finished_padding = ratatui::widgets::block::Padding::new(3, 0, 1, 1);
 
             let finished_block =
-                ratatui::widgets::Block::bordered().title(self.current_jobs[i].job_name.to_owned());
+                ratatui::widgets::Block::bordered().title(self.current_jobs[i].id.0.to_owned());
 
             let block_inner = finished_block.inner(current_jobs_split_areas[i]);
 
