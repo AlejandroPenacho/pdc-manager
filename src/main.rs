@@ -41,6 +41,8 @@ enum InterfaceToMainMessage {
 struct FirstJobMessage {
     total_epochs: usize,
     id: JobId,
+    #[serde(default)]
+    metrics: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +53,8 @@ struct JobMessage {
     total_epochs: Option<usize>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    metrics: Option<Vec<(String, f64)>>,
 }
 
 #[tokio::main]
@@ -89,6 +93,11 @@ async fn main() {
                     messages: Vec::new(),
                     current_epoch: 0,
                     total_epochs: first_message.total_epochs,
+                    metrics: first_message
+                        .metrics
+                        .iter()
+                        .map(|x| (x.to_owned(), Vec::new()))
+                        .collect(),
                 })
             }
             MainLoopMessage::ConnectionDropped(sender) => {
@@ -267,6 +276,7 @@ struct CurrentJob {
     messages: Vec<String>,
     current_epoch: usize,
     total_epochs: usize,
+    metrics: std::collections::HashMap<String, Vec<(f64, f64)>>,
 }
 
 struct App {
@@ -284,15 +294,6 @@ impl App {
         }
     }
 
-    fn add_new_connection(&mut self, connection_name: String) {
-        self.current_jobs.push(CurrentJob {
-            id: JobId(connection_name),
-            messages: Vec::new(),
-            current_epoch: 0,
-            total_epochs: 1,
-        })
-    }
-
     fn add_connection_message(&mut self, connection_name: JobId, message: JobMessage) {
         for job in self.current_jobs.iter_mut() {
             if job.id.0 == connection_name.0 {
@@ -304,6 +305,14 @@ impl App {
                 }
                 if let Some(x) = message.total_epochs {
                     job.total_epochs = x;
+                }
+                if let Some(x) = message.metrics {
+                    for (metric_name, value) in x {
+                        job.metrics
+                            .get_mut(&metric_name)
+                            .unwrap()
+                            .push((message.current_epoch.unwrap() as f64, value));
+                    }
                 }
                 break;
             }
@@ -407,7 +416,22 @@ impl App {
                     .gauge_style(ratatui::style::Color::Blue),
                 progress_area,
             );
-
+            frame.render_widget(
+                ratatui::widgets::Chart::new(vec![ratatui::widgets::Dataset::default()
+                    .data(&job.metrics["accuracy"])
+                    .marker(ratatui::symbols::Marker::Braille)
+                    .graph_type(ratatui::widgets::GraphType::Line)])
+                .x_axis(ratatui::widgets::Axis::default().bounds([0.0, job.total_epochs as f64]))
+                .y_axis(ratatui::widgets::Axis::default().bounds([0.0, 1.0])),
+                second_area,
+            );
+            /*
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(format!("{:?}", &job.metrics["accuracy"])),
+                second_area,
+            )
+            */
+            /*
             frame.render_widget(
                 ratatui::widgets::List::new(
                     job.messages
@@ -419,6 +443,7 @@ impl App {
                 ),
                 second_area,
             );
+            */
         }
 
         frame.render_widget(

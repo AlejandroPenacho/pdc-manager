@@ -12,15 +12,23 @@ class InitialMessage:
     def to_message(self):
         return json.dumps({
            "id": self.id,
-           "total_epochs": self.total_epochs
+           "total_epochs": self.total_epochs,
+           "metrics": ["accuracy"]
         }).encode()
 
 
 class StdMessage:
-    def __init__(self, message=None, current_epoch=None, total_epochs=None):
+    def __init__(
+         self,
+         message=None,
+         current_epoch=None,
+         total_epochs=None,
+         accuracy=None
+     ):
         self.message = message
         self.current_epoch = current_epoch
         self.total_epochs = total_epochs
+        self.accuracy = accuracy
 
     def to_message(self):
         out = {}
@@ -30,8 +38,11 @@ class StdMessage:
             out["current_epoch"] = self.current_epoch
         if self.total_epochs is not None:
             out["total_epochs"] = self.total_epochs
+        if self.accuracy is not None:
+            out["metrics"] = [["accuracy", self.accuracy]]
 
-        return json.dumps(out).encode()
+        message = json.dumps(out)
+        return message.encode()
 
 
 class FakeTraining:
@@ -39,6 +50,7 @@ class FakeTraining:
         self.socket = socket.socket(family=socket.AF_UNIX)
         self.total_epochs = 1000
         self.current_epoch = 0
+        self.current_accuracy = 0.0
         self.connected = False
         self.name = name
 
@@ -57,12 +69,17 @@ class FakeTraining:
 
         self.current_epoch += random.randint(50, 150)
         self.current_epoch = min(self.current_epoch, self.total_epochs)
-        message = f"Hello with {self.current_epoch}"
+
+        self.current_accuracy = 1.0 - (1.0 - self.current_accuracy) \
+            * (0.7 + 0.2 * random.random())
+
+        message = f"Hello with {self.current_accuracy}"
 
         total_message = StdMessage(
            message=message,
            current_epoch=self.current_epoch,
-           total_epochs=self.total_epochs
+           total_epochs=self.total_epochs,
+           accuracy=self.current_accuracy
         )
 
         self.socket.send(total_message.to_message())
